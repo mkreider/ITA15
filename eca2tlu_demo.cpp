@@ -12,13 +12,17 @@ using namespace GSI_TLU;
 
 static const char* program;
 #define MS_CH_OUT0    7
-#define MS_CH_OUT1    8
+#define MS_CH_OUT1    6
 #define MS_CH_IN0     6
 
 #define SL_CH_IN0     1 
 #define CH_LVDS       2
 
-#define EVT0          0xdeadbeefULL
+#define EVT_DPULSE     0xdeadbee0ULL
+#define EVT_RISE       0xdeadbee1ULL
+#define EVT_FALL       0xdeadbee2ULL
+#define EVT_PULSE0     0xdeadbee3ULL
+#define EVT_PULSE1     0xdeadbee4ULL
 
 #define OFFS0         0
 #define OFFS1         (OFFS0 + 40)
@@ -28,8 +32,11 @@ static const char* program;
 #define LVDS_BITS_HI         0
 #define LVDS_BITS_LO         12
 
-#define MS_CH0_CH1_HI (((1 << MS_CH_OUT0) | (1 << MS_CH_OUT1)) << LVDS_BITS_HI)
-#define MS_CH0_CH1_LO (((1 << MS_CH_OUT0) | (1 << MS_CH_OUT1)) << LVDS_BITS_LO)
+#define MS_CH0_HI     ((1 << MS_CH_OUT0) << LVDS_BITS_HI)
+#define MS_CH0_LO     ((1 << MS_CH_OUT0) << LVDS_BITS_LO)
+
+#define MS_CH1_HI     ((1 << MS_CH_OUT1) << LVDS_BITS_HI)
+#define MS_CH1_LO     ((1 << MS_CH_OUT1) << LVDS_BITS_LO)
 
 
 //clear ECA
@@ -108,7 +115,7 @@ static void activate(ECA& eca, int channel) {
 static int send(ECA& eca, int stream, Event event, uint64_t off, Tef tef) {
     eb_status_t status;
     uint64_t param;
-    time_t time;
+    uint64_t time;
     
     if (stream == -1) {
       fprintf(stderr, "%s: specify a stream to send with -s\n", program);
@@ -116,7 +123,9 @@ static int send(ECA& eca, int stream, Event event, uint64_t off, Tef tef) {
     }
 
     param = 0;
-    time = eca.time + eca.delay(off);
+    
+    time = eca.time + off;
+    printf("TimeB4: %ull, after: %ull\n", eca.time, time);
     if ((status = eca.streams[stream].send(EventEntry(event, param, tef, time))) != EB_OK)
       die(status, "EventStream::send");
   
@@ -167,10 +176,18 @@ int main(int argc, const char** argv) {
   Table table;
   
   //add rules for double pulse __--_____----___
-  table.add(TableEntry(EVT0, OFFS0, MS_CH0_CH1_HI, CH_LVDS, 64));
-  table.add(TableEntry(EVT0, OFFS1, MS_CH0_CH1_LO, CH_LVDS, 64));
-  table.add(TableEntry(EVT0, OFFS2, MS_CH0_CH1_HI, CH_LVDS, 64));
-  table.add(TableEntry(EVT0, OFFS3, MS_CH0_CH1_LO, CH_LVDS, 64));
+  table.add(TableEntry(EVT_DPULSE, OFFS0, MS_CH0_HI | MS_CH1_HI, CH_LVDS, 64));
+  table.add(TableEntry(EVT_DPULSE, OFFS1, MS_CH0_LO | MS_CH1_LO, CH_LVDS, 64));
+  table.add(TableEntry(EVT_DPULSE, OFFS2, MS_CH0_HI | MS_CH1_HI, CH_LVDS, 64));
+  table.add(TableEntry(EVT_DPULSE, OFFS3, MS_CH0_LO | MS_CH1_LO, CH_LVDS, 64));
+  
+  //add rules for single pulses __--__
+  table.add(TableEntry(EVT_PULSE0, 0,  MS_CH0_HI, CH_LVDS, 64));
+  table.add(TableEntry(EVT_PULSE0, 40/8, MS_CH0_LO, CH_LVDS, 64));
+  
+  table.add(TableEntry(EVT_PULSE1, 0,  MS_CH0_HI | MS_CH1_HI, CH_LVDS, 64));
+  table.add(TableEntry(EVT_PULSE1, 40/8, MS_CH1_LO, CH_LVDS, 64));
+  
   commit(ms_eca, table);
   
     //dump(ms_eca)
@@ -180,7 +197,10 @@ int main(int argc, const char** argv) {
   enable(ms_eca, true);
   
   usleep(100000);
-  send(ms_eca, 0, 0xdeadbeefULL, 2000000000ULL, 0);
+  //send(ms_eca, 0, 0xdeadbee0ULL, 200000000ULL, 0);
+  
+  send(ms_eca, 0, EVT_PULSE0, 2000000000ULL/8, 0);
+  send(ms_eca, 0, EVT_PULSE1, 2000000008ULL/8, 4);
 /*    
   //set up master tlu
   // Configure master  TLU to record rising edge timestamps //
