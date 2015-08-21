@@ -11,11 +11,12 @@ using namespace GSI_ECA;
 using namespace GSI_TLU;
 
 static const char* program;
+#define ALL           0xfff
 #define MS_CH_OUT0    7
 #define MS_CH_OUT1    6
-#define MS_CH_IN0     6
+#define MS_CH_IN0     0
 
-#define SL_CH_IN0     1 
+#define SL_CH_IN0     0 
 #define CH_LVDS       2
 
 #define EVT_DPULSE     0xdeadbee0ULL
@@ -23,6 +24,7 @@ static const char* program;
 #define EVT_FALL       0xdeadbee2ULL
 #define EVT_PULSE0     0xdeadbee3ULL
 #define EVT_PULSE1     0xdeadbee4ULL
+#define EVT_PULSEALL   0xdeadbee5ULL
 
 #define OFFS0         0
 #define OFFS1         (OFFS0 + 40)
@@ -34,6 +36,9 @@ static const char* program;
 
 #define MS_CH0_HI     ((1 << MS_CH_OUT0) << LVDS_BITS_HI)
 #define MS_CH0_LO     ((1 << MS_CH_OUT0) << LVDS_BITS_LO)
+
+#define MS_CHX_HI     (ALL << LVDS_BITS_HI)
+#define MS_CHX_LO     (ALL << LVDS_BITS_LO)
 
 #define MS_CH1_HI     ((1 << MS_CH_OUT1) << LVDS_BITS_HI)
 #define MS_CH1_LO     ((1 << MS_CH_OUT1) << LVDS_BITS_LO)
@@ -112,10 +117,10 @@ static void activate(ECA& eca, int channel) {
 }
 
 
-static int send(ECA& eca, int stream, Event event, uint64_t off, Tef tef) {
+static int send(ECA& eca, int stream, Event event, uint64_t time, uint32_t frac) {
     eb_status_t status;
     uint64_t param;
-    uint64_t time;
+    Tef tef = ((frac & 0x7) << 29);
     
     if (stream == -1) {
       fprintf(stderr, "%s: specify a stream to send with -s\n", program);
@@ -124,54 +129,17 @@ static int send(ECA& eca, int stream, Event event, uint64_t off, Tef tef) {
 
     param = 0;
     
-    time = eca.time + off;
-    printf("TimeB4: %ull, after: %ull\n", eca.time, time);
+
+    //printf("tef: %08x\n", tef);
     if ((status = eca.streams[stream].send(EventEntry(event, param, tef, time))) != EB_OK)
       die(status, "EventStream::send");
   
   return 0;
 }
 
-
-int main(int argc, const char** argv) {
-  Socket ms_socket, sl_socket;
-  Device ms_device, sl_device;
-  status_t status;
-  program = argv[0];
-
-
-  if (argc != 2) {
-    fprintf(stderr, "%s: expecting argument <device>\n", argv[0]);
-    return 1;
-  }
-  
-  ms_socket.open();
-  if ((status = ms_device.open(ms_socket, argv[1])) != EB_OK) {
-    fprintf(stderr, "%s: failed to open master %s: %s\n", argv[0], argv[1], eb_status(status));
-    return 1;
-  }
-  
-  /* Find master ECA */
-  std::vector<ECA> ecas;
-  ECA::probe(ms_device, ecas);
-  assert (ecas.size() == 1);
-  ECA& ms_eca = ecas[0];
-  
-  /* Find master TLU */
-  std::vector<TLU> tlus;
-  TLU::probe(ms_device, tlus);
-  assert (tlus.size() == 1);
-  TLU& ms_tlu = tlus[0];
-  
-  
-  //configure master IO
-  
-  //set up master eca
-  //disable and clear
-  enable(ms_eca, false);
-  flush(ms_eca);
-
-   ECA& eca = ecas[0];
+void setupPulseDemo(ECA& eca) {
+  enable(eca, false);
+  flush(eca);
 
   Table table;
   
@@ -182,25 +150,168 @@ int main(int argc, const char** argv) {
   table.add(TableEntry(EVT_DPULSE, OFFS3, MS_CH0_LO | MS_CH1_LO, CH_LVDS, 64));
   
   //add rules for single pulses __--__
-  table.add(TableEntry(EVT_PULSE0, 0,  MS_CH0_HI, CH_LVDS, 64));
-  table.add(TableEntry(EVT_PULSE0, 40/8, MS_CH0_LO, CH_LVDS, 64));
+  table.add(TableEntry(EVT_PULSE0, 0,  MS_CHX_HI , CH_LVDS, 64));
+  table.add(TableEntry(EVT_PULSE0, 40/8, MS_CHX_LO , CH_LVDS, 64));
   
   table.add(TableEntry(EVT_PULSE1, 0,  MS_CH0_HI | MS_CH1_HI, CH_LVDS, 64));
-  table.add(TableEntry(EVT_PULSE1, 40/8, MS_CH1_LO, CH_LVDS, 64));
+  table.add(TableEntry(EVT_PULSE1, 40/8, MS_CH0_LO | MS_CH1_LO, CH_LVDS, 64));
   
-  commit(ms_eca, table);
+  table.add(TableEntry(EVT_PULSEALL, 0,  MS_CHX_HI, CH_LVDS, 64));
+  table.add(TableEntry(EVT_PULSEALL, 40/8, MS_CHX_LO, CH_LVDS, 64));
   
-    //dump(ms_eca)
+  commit(eca, table);
+  
+    //dump(eca)
   //commit and arm
 
-  activate(ms_eca, CH_LVDS);
-  enable(ms_eca, true);
+  activate(eca, CH_LVDS);
+  enable(eca, true);
+
+}
+
+static void ioSetup(Device& device, uint32_t outputchannels) {
+  eb_status_t status;
+  std::vector<struct sdb_device> devices;
   
-  usleep(100000);
+  //find IO ctrl and setup ports
+  device.sdb_find_by_identity(0x651ULL, 0x4d78adfd, devices);
+  if (devices.size() == 0) {
+    die(status, "no io controller found");
+  }
+  status = device.write((eb_address_t)((eb_address_t)devices[0].sdb_component.addr_first +4), EB_BIG_ENDIAN | EB_DATA32, (eb_data_t)outputchannels);
+  if (status != EB_OK) die(status, "failed to create cycle"); 
+}
+
+
+
+
+
+int main(int argc, const char** argv) {
+  Socket ms_socket, sl_socket;
+  Device ms_device, sl_device;
+  std::vector<ECA> ms_ecas, sl_ecas;
+  std::vector<TLU> ms_tlus, sl_tlus;
+  status_t status;
+  program = argv[0];
+
+
+  if (argc != 3) {
+    fprintf(stderr, "%s: expecting argument <master device> <slave device>\n", argv[0]);
+    return 1;
+  }
+  
+  ms_socket.open();
+  if ((status = ms_device.open(ms_socket, argv[1])) != EB_OK) {
+    fprintf(stderr, "%s: failed to open master %s: %s\n", argv[0], argv[1], eb_status(status));
+    return 1;
+  }
+  
+  ioSetup(ms_device, MS_CH0_HI | MS_CH1_HI); 
+  
+  /* Find master ECA */
+  ECA::probe(ms_device, ms_ecas);
+  assert (ms_ecas.size() == 1);
+  ECA& ms_eca = ms_ecas[0];
+  
+  /* Find master TLU */
+  TLU::probe(ms_device, ms_tlus);
+  assert (ms_tlus.size() == 1);
+  TLU& ms_tlu = ms_tlus[0];
+  
+  
+  
+  setupPulseDemo(ms_eca);
+  
+ //set up master tlu
+  // Configure master  TLU to record rising edge timestamps //
+  ms_tlu.hook(-1, false);
+  ms_tlu.set_enable(false); // no interrupts, please
+  ms_tlu.clear(-1);
+  ms_tlu.listen(-1, true, true, 8); // Listen on all inputs 
+  
+  sl_socket.open();
+  if ((status = sl_device.open(sl_socket, argv[2])) != EB_OK) {
+    fprintf(stderr, "%s: failed to open slave %s: %s\n", argv[0], argv[2], eb_status(status));
+    return 1;
+  }
+  
+  ioSetup(sl_device, MS_CH0_HI | MS_CH1_HI); 
+  
+  /* Find slave ECA */
+  ECA::probe(sl_device, sl_ecas);
+  assert (sl_ecas.size() == 1);
+  ECA& sl_eca = sl_ecas[0];
+  
+  /* Find slave TLU */
+  TLU::probe(sl_device, sl_tlus);
+  assert (sl_tlus.size() == 1);
+  TLU& sl_tlu = sl_tlus[0];
+  
+  
+  
+  setupPulseDemo(sl_eca);
+  //configure master IO
+  
+  
+  
+  // Configure master  TLU to record rising edge timestamps //
+  sl_tlu.hook(-1, false);
+  sl_tlu.set_enable(false); // no interrupts, please
+  sl_tlu.clear(-1);
+  sl_tlu.listen(-1, true, true, 8); // Listen on all inputs 
+  
+  
+  //set up master eca
+  //disable and clear
+  
+  
+  
+  usleep(1000);
   //send(ms_eca, 0, 0xdeadbee0ULL, 200000000ULL, 0);
   
-  send(ms_eca, 0, EVT_PULSE0, 2000000000ULL/8, 0);
-  send(ms_eca, 0, EVT_PULSE1, 2000000008ULL/8, 4);
+  
+
+  uint64_t exectime = 0;
+  uint64_t lasttime = 0;
+//                  s  m  u  n  
+  uint64_t margin = 1000000000ULL;
+  uint64_t period =   10000000ULL;
+  uint64_t sample = period/5;
+  
+  std::vector<std::vector<uint64_t> > ms_queues;
+  std::vector<std::vector<uint64_t> > sl_queues;
+  
+  for(int i=0; i<3;i++){
+    ms_eca.refresh();
+    //round up to multiple of n, x + n-1 div n * n
+    exectime = ((ms_eca.time + margin/8 + period/8 -1) / (period/8)) * (period/8);
+    if(exectime != lasttime) {
+      send(ms_eca, 0, EVT_PULSEALL, exectime, 1);
+      send(sl_eca, 0, EVT_PULSEALL, exectime, 0);
+    }
+    ms_tlu.pop_all( ms_queues);
+    sl_tlu.pop_all( sl_queues);
+    
+    lasttime = exectime;
+    usleep(sample/1000);
+  }
+  
+  
+  printf("MS TLU: %u\n", ms_queues.size());
+  
+  for (unsigned i = 0; i < ms_queues.size(); ++i) {
+      for (unsigned j = 0; j < ms_queues[i].size(); ++j) {
+        printf("Master %d saw an event! %s\n", i, ms_eca.date(ms_queues[i][j]/8).c_str());
+      }
+    }
+  
+  printf("SL TLU: %u\n", sl_queues.size());
+    
+  for (unsigned i = 0; i < sl_queues.size(); ++i) {
+      for (unsigned j = 0; j < sl_queues[i].size(); ++j) {
+        printf("slave %d saw an event! %s\n", i, sl_eca.date(sl_queues[i][j]/8).c_str());
+      }
+    }  
 /*    
   //set up master tlu
   // Configure master  TLU to record rising edge timestamps //
@@ -227,13 +338,8 @@ int main(int argc, const char** argv) {
 
   
   while (1) { 
-    std::vector<std::vector<uint64_t> > queues;
-    tlu.pop_all(queues);
-    for (unsigned i = 0; i < queues.size(); ++i) {
-      for (unsigned j = 0; j < queues[i].size(); ++j) {
-        printf("Input %d saw an event! %s\n", i, eca.date(queues[i][j]/8).c_str());
-      }
-    }
+    
+    
     usleep(20000); // 50Hz is enough
   }
 */  
