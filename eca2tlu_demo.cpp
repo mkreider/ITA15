@@ -26,6 +26,10 @@ static const char* program;
 #define EVT_PULSE1     0xdeadbee4ULL
 #define EVT_PULSEALL   0xdeadbee5ULL
 
+
+#define PULSELEN0     40
+#define PULSELEN1     400
+
 #define OFFS0         0
 #define OFFS1         (OFFS0 + 40)
 #define OFFS2         (OFFS1 + 200)
@@ -227,7 +231,7 @@ int main(int argc, const char** argv) {
   ms_tlu.hook(-1, false);
   ms_tlu.set_enable(false); // no interrupts, please
   ms_tlu.clear(-1);
-  ms_tlu.listen(-1, true, true, 8); // Listen on all inputs 
+  ms_tlu.listen(-1, true, true, 4); // Listen on all inputs 
   
   sl_socket.open();
   if ((status = sl_device.open(sl_socket, argv[2])) != EB_OK) {
@@ -254,11 +258,11 @@ int main(int argc, const char** argv) {
   
   
   
-  // Configure master  TLU to record rising edge timestamps //
+  // Configure slave  TLU to record rising edge timestamps //
   sl_tlu.hook(-1, false);
   sl_tlu.set_enable(false); // no interrupts, please
   sl_tlu.clear(-1);
-  sl_tlu.listen(-1, true, true, 8); // Listen on all inputs 
+  sl_tlu.listen(-1, true, true, 4); // Listen on all inputs 
   
   
   //set up master eca
@@ -280,13 +284,25 @@ int main(int argc, const char** argv) {
   
   std::vector<std::vector<uint64_t> > ms_queues;
   std::vector<std::vector<uint64_t> > sl_queues;
+/*  
+  //sl_tlu.test(0, 0x7f);
+  sl_tlu.pop_all( sl_queues);
+  printf("SL TLU: %u\n", sl_queues.size());
+    
+  for (unsigned i = 0; i < sl_queues.size(); ++i) {
+      for (unsigned j = 0; j < sl_queues[i].size(); ++j) {
+        printf("slave %d saw an event! %s\n", i, sl_eca.date(sl_queues[i][j]/8).c_str());
+      }
+    }  
+*/
   
-  for(int i=0; i<3;i++){
+  
+  for(int i=0; i<1000;i++){
     ms_eca.refresh();
     //round up to multiple of n, x + n-1 div n * n
     exectime = ((ms_eca.time + margin/8 + period/8 -1) / (period/8)) * (period/8);
     if(exectime != lasttime) {
-      send(ms_eca, 0, EVT_PULSEALL, exectime, 1);
+      send(ms_eca, 0, EVT_PULSEALL, exectime, 0);
       send(sl_eca, 0, EVT_PULSEALL, exectime, 0);
     }
     ms_tlu.pop_all( ms_queues);
@@ -296,9 +312,71 @@ int main(int argc, const char** argv) {
     usleep(sample/1000);
   }
   
+  for(int i=0; i<1000;i++){
+    
+    ms_tlu.pop_all( ms_queues);
+    sl_tlu.pop_all( sl_queues);
+
+    usleep(sample/1000);
+  }
+  
   
   printf("MS TLU: %u\n", ms_queues.size());
   
+  double diffsum, diffsum1 = 0.0;
+  double diffmean;
+  double diffmin = 0.0;
+  double diffmax;
+  unsigned int maxsize = 0;
+
+  
+
+ // for (unsigned i = 0; i < sl_queues.size(); ++i) {
+      diffsum = 0.0;
+      diffmin = 0.0;
+      diffmax = 0.0;
+      maxsize = ms_queues[4].size();
+      for (unsigned j = 0; j < ms_queues[4].size(); ++j) {
+        int64_t t = ms_queues[10][j] - ms_queues[4][j];
+        //printf("Diff: %d, ch%u v%u \n", t, i, j);
+        diffsum += (double)t;
+        if (diffmin > (double)t) diffmin = (double)t;
+        if (diffmax < (double)t) diffmax = (double)t;
+      }
+      diffmean = diffsum / (double)maxsize;
+      printf("Diff Mean Slave Ch 10-4, %f, %u values captured and compared\n", diffmean, maxsize);
+   // }
+   
+   diffsum = 0.0;
+      diffmin = 0.0;
+      diffmax = 0.0;
+      maxsize = sl_queues[4].size();
+      for (unsigned j = 0; j < sl_queues[4].size(); ++j) {
+        int64_t t = sl_queues[10][j] - sl_queues[4][j];
+        //printf("Diff: %d, ch%u v%u \n", t, i, j);
+        diffsum += (double)t;
+        if (diffmin > (double)t) diffmin = (double)t;
+        if (diffmax < (double)t) diffmax = (double)t;
+      }
+      diffmean = diffsum / (double)maxsize;
+      printf("Diff Mean Slave Ch 10-4, %f, %u values captured and compared\n", diffmean, maxsize);
+
+/*    
+        diffsum = 0.0;
+   
+   int ch = 4;     
+        
+      if (maxsize < ms_queues[ch].size()) maxsize = ms_queues[ch].size();
+      for (unsigned j = 0; j < ms_queues[ch].size(); ++j) {
+        time_t t = sl_queues[ch][j] - ms_queues[ch][j];
+        printf("Diff: %ull, %u \n", t, j);
+        diffsum += (double)t;
+        if (diffmin > (double)t) diffmin = (double)t;
+        if (diffmax < (double)t) diffmax = (double)t;
+      }
+  */   
+  
+  /*
   for (unsigned i = 0; i < ms_queues.size(); ++i) {
       for (unsigned j = 0; j < ms_queues[i].size(); ++j) {
         printf("Master %d saw an event! %s\n", i, ms_eca.date(ms_queues[i][j]/8).c_str());
@@ -312,56 +390,10 @@ int main(int argc, const char** argv) {
         printf("slave %d saw an event! %s\n", i, sl_eca.date(sl_queues[i][j]/8).c_str());
       }
     }  
-/*    
-  //set up master tlu
-  // Configure master  TLU to record rising edge timestamps //
-  tlu.hook(-1, false);
-  tlu.set_enable(false); // no interrupts, please
-  tlu.clear(-1);
-  tlu.listen(-1, true, true, 8); // Listen on all inputs 
-  
-  socket.open();
-  if ((status = sl_device.open(socket, argv[1])) != EB_OK) {
-    fprintf(stderr, "%s: failed to open slave %s: %s\n", argv[0], argv[1], eb_status(status));
-    return 1;
-  }
-  
-  // Find master TLU //
-  TLU::probe(device, tlus);
-  assert (tlus.size() == 1);
-  TLU& sl_tlu = tlus[0];
-  
-  
-  
-  
-  
+*/
 
-  
-  while (1) { 
-    
-    
-    usleep(20000); // 50Hz is enough
-  }
-*/  
   return 0;
 }
 
-
-
-
-
-  
-
-  //set up two board pulse->tlu demo
-
-
-  
-  
-  
-  //set up slave tlu
-
-
-  
-    
 
 
